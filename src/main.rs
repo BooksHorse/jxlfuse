@@ -27,11 +27,13 @@ use std::time::{self, Duration};
 struct JxlFilesystem {
     attrs: BTreeMap<u64, FileAttr>,
     inodes: BTreeMap<u64, PathBuf>,
+    caches: BTreeMap<PathBuf, Vec<u8>>,
 }
 impl JxlFilesystem {
     fn new() -> JxlFilesystem {
         let mut attrs = BTreeMap::new();
         let mut inodes = BTreeMap::new();
+        let mut caches = BTreeMap::new();
         let ts = SystemTime::now();
         let attr = FileAttr {
             ino: 1,
@@ -53,7 +55,11 @@ impl JxlFilesystem {
         attrs.insert(1, attr);
         inodes.insert(1, PathBuf::from("/home/bocchi/fusetest/jxltest/"));
 
-        JxlFilesystem { attrs, inodes }
+        JxlFilesystem {
+            attrs,
+            inodes,
+            caches,
+        }
     }
 }
 impl Filesystem for JxlFilesystem {
@@ -88,52 +94,81 @@ impl Filesystem for JxlFilesystem {
         match f {
             Some(d) => {
                 warn!("file : {:?}, extension: {:?}", d, d.extension());
-                warn!(
-                    "dasd {}",
-                    !d.extension().unwrap().eq_ignore_ascii_case("jxl")
-                );
-                if !d.extension().unwrap().eq_ignore_ascii_case("jxl") {
-                    let data = std::fs::read(d).unwrap();
-                    let mut end = offset as usize + size as usize;
-                    if end > data.len() {
-                        end = data.len()
-                    }
-                    if offset as usize > data.len() {
-                        reply.error(ENOSYS);
-                        return;
-                    }
-                    warn!("replying original data");
-                    reply.data(&data[offset as usize..end]);
-                    return;
-                }
-                let file = std::fs::read(d).unwrap();
-                let mut decoder = decoder_builder().build().unwrap();
-                let (metadata, data) = decoder.reconstruct(&file).unwrap();
-                // warn!("content:{:?}", file);
-                decoder.decode_with::<u8>(&file);
-                match data {
-                    Data::Jpeg(jpeg) => {
-                        /* do something with the JPEG data */
-                        info!("replying");
-                        //reply.data(String::from("hi").as_bytes());
-                        let mut end = offset as usize + size as usize;
-                        if end > jpeg.len() {
-                            end = jpeg.len()
+                match d.extension() {
+                    Some(ext) => {
+                        if !ext.eq_ignore_ascii_case("jxl") {
+                            let data = std::fs::read(d).unwrap();
+                            let mut end = offset as usize + size as usize;
+                            if end > data.len() {
+                                end = data.len()
+                            }
+                            if offset as usize > data.len() {
+                                reply.error(ENOSYS);
+                                return;
+                            }
+                            warn!("replying original data");
+                            reply.data(&data[offset as usize..end]);
+                            return;
                         }
-                        if offset as usize > jpeg.len() {
+                    }
+                    None => {
+                        let data = std::fs::read(d).unwrap();
+                        let mut end = offset as usize + size as usize;
+                        if end > data.len() {
+                            end = data.len()
+                        }
+                        if offset as usize > data.len() {
                             reply.error(ENOSYS);
                             return;
                         }
-                        reply.data(&jpeg[offset as usize..end]);
+                        warn!("replying original data");
+                        reply.data(&data[offset as usize..end]);
                         return;
                     }
-                    Data::Pixels(pixels) => {
-                        /* do something with the pixels data */
-                        match pixels {
-                            jpegxl_rs::decode::Pixels::Float(_) => todo!(),
-                            jpegxl_rs::decode::Pixels::Uint8(_) => todo!(),
-                            jpegxl_rs::decode::Pixels::Uint16(_) => todo!(),
-                            jpegxl_rs::decode::Pixels::Float16(_) => todo!(),
+                }
+                let file = std::fs::read(d).unwrap();
+                if let Some(jpeg) = self.caches.get(d) {
+                    info!("replying with caches");
+                    let mut end = offset as usize + size as usize;
+                    if end > jpeg.len() {
+                        end = jpeg.len()
+                    }
+                    if offset as usize > jpeg.len() {
+                        reply.error(ENOSYS);
+                        return;
+                    }
+                    reply.data(&jpeg[offset as usize..end]);
+                    return;
+                } else {
+                    let mut decoder = decoder_builder().build().unwrap();
+                    let (metadata, data) = decoder.reconstruct(&file).unwrap();
+                    // warn!("content:{:?}", file);
+                    decoder.decode_with::<u8>(&file);
+                    match data {
+                        Data::Jpeg(jpeg) => {
+                            self.caches.insert(d.to_owned(), jpeg.clone());
+                            /* do something with the JPEG data */
+                            info!("replying");
+                            //reply.data(String::from("hi").as_bytes());
+                            let mut end = offset as usize + size as usize;
+                            if end > jpeg.len() {
+                                end = jpeg.len()
+                            }
+                            if offset as usize > jpeg.len() {
+                                reply.error(ENOSYS);
+                                return;
+                            }
+                            reply.data(&jpeg[offset as usize..end]);
+                            return;
+                        }
+                        Data::Pixels(pixels) => {
+                            /* do something with the pixels data */
+                            match pixels {
+                                jpegxl_rs::decode::Pixels::Float(_) => todo!(),
+                                jpegxl_rs::decode::Pixels::Uint8(_) => todo!(),
+                                jpegxl_rs::decode::Pixels::Uint16(_) => todo!(),
+                                jpegxl_rs::decode::Pixels::Float16(_) => todo!(),
+                            }
                         }
                     }
                 }
@@ -160,7 +195,13 @@ impl Filesystem for JxlFilesystem {
             path.push(name);
         }
 
-        let meta = std::fs::metadata(path).unwrap();
+        let meta = match std::fs::metadata(path) {
+            Ok(e) => e,
+            Err(_) => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
         let ttl = Duration::new(0, 0);
         let ts = SystemTime::now();
         let kind = || -> FileType {
