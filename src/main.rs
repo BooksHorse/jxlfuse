@@ -80,14 +80,32 @@ impl Filesystem for JxlFilesystem {
         reply: ReplyData,
     ) {
         warn!(
-            "[Not Implemented] read(ino: {:#x?}, fh: {}, offset: {}, size: {}, \
+            "read(ino: {:#x?}, fh: {}, offset: {}, size: {}, \
             flags: {:#x?}, lock_owner: {:?})",
             ino, fh, offset, size, flags, lock_owner
         );
         let f = self.inodes.get(&ino);
         match f {
             Some(d) => {
-                warn!("file : {:?}", d);
+                warn!("file : {:?}, extension: {:?}", d, d.extension());
+                warn!(
+                    "dasd {}",
+                    !d.extension().unwrap().eq_ignore_ascii_case("jxl")
+                );
+                if !d.extension().unwrap().eq_ignore_ascii_case("jxl") {
+                    let data = std::fs::read(d).unwrap();
+                    let mut end = offset as usize + size as usize;
+                    if end > data.len() {
+                        end = data.len()
+                    }
+                    if offset as usize > data.len() {
+                        reply.error(ENOSYS);
+                        return;
+                    }
+                    warn!("replying original data");
+                    reply.data(&data[offset as usize..end]);
+                    return;
+                }
                 let file = std::fs::read(d).unwrap();
                 let mut decoder = decoder_builder().build().unwrap();
                 let (metadata, data) = decoder.reconstruct(&file).unwrap();
@@ -134,6 +152,7 @@ impl Filesystem for JxlFilesystem {
             reply.error(ENOENT);
             return;
         }
+        warn!("lookup: {:?}", path);
         let cc = name.to_owned().into_string().unwrap();
         if cc.ends_with(".jxl.jpg") {
             path.push(cc.strip_suffix(".jpg").unwrap().to_owned());
@@ -188,6 +207,7 @@ impl Filesystem for JxlFilesystem {
         println!("readdir(ino={}, fh={}, offset={})", ino, fh, offset);
 
         let mut d = None;
+
         if ino == 1 {
             if offset == 0 {
                 reply.add(1, 0, FileType::Directory, &Path::new("."));
@@ -196,6 +216,10 @@ impl Filesystem for JxlFilesystem {
                 d = Some(std::fs::read_dir("/home/bocchi/fusetest/jxltest/").unwrap());
             }
         } else if let Some(aa) = self.inodes.get(&ino) {
+            if offset != 0 {
+                reply.ok();
+                return;
+            }
             d = Some(aa.read_dir().unwrap());
         } else {
             reply.error(ENOENT);
@@ -329,7 +353,7 @@ fn main() {
         Path::new("/home/bocchi/fusetest/mountpoint"),
         &[
             MountOption::AutoUnmount,
-            MountOption::AllowRoot,
+            MountOption::AllowOther,
             MountOption::CUSTOM("direct_io".to_string()),
         ],
     )
