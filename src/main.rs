@@ -1,5 +1,7 @@
 extern crate fuser;
 extern crate libc;
+use clap::{arg, Command};
+use clap::{Arg, Parser};
 use fuser::FileType;
 use fuser::MountOption;
 use fuser::ReplyData;
@@ -12,6 +14,7 @@ use jpegxl_rs::image::ToDynamic;
 use libc::{ENOENT, ENOSYS};
 use log::info;
 use log::warn;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsStr;
@@ -28,9 +31,10 @@ struct JxlFilesystem {
     attrs: BTreeMap<u64, FileAttr>,
     inodes: BTreeMap<u64, PathBuf>,
     caches: BTreeMap<PathBuf, Vec<u8>>,
+    basedir: PathBuf,
 }
 impl JxlFilesystem {
-    fn new() -> JxlFilesystem {
+    fn new(Directory: PathBuf) -> JxlFilesystem {
         let mut attrs = BTreeMap::new();
         let mut inodes = BTreeMap::new();
         let mut caches = BTreeMap::new();
@@ -53,12 +57,13 @@ impl JxlFilesystem {
             blksize: 0,
         };
         attrs.insert(1, attr);
-        inodes.insert(1, PathBuf::from("/home/bocchi/fusetest/jxltest/"));
+        inodes.insert(1, Directory.clone());
 
         JxlFilesystem {
             attrs,
             inodes,
             caches,
+            basedir: Directory,
         }
     }
 }
@@ -254,7 +259,7 @@ impl Filesystem for JxlFilesystem {
                 reply.add(1, 0, FileType::Directory, &Path::new("."));
                 reply.add(1, 1, FileType::Directory, &Path::new(".."));
                 // println!("{}", d.count());
-                d = Some(std::fs::read_dir("/home/bocchi/fusetest/jxltest/").unwrap());
+                d = Some(std::fs::read_dir(self.basedir.clone()).unwrap());
             }
         } else if let Some(aa) = self.inodes.get(&ino) {
             if offset != 0 {
@@ -362,36 +367,48 @@ impl Filesystem for JxlFilesystem {
     }
 }
 
+#[derive(Parser)] // requires `derive` feature
+#[command(version, about, long_about = None)]
+struct Cli {
+    #[arg()]
+    basedir: PathBuf,
+
+    #[arg()]
+    mountpoint: PathBuf,
+}
 fn main() {
     env_logger::init();
-    let basedir: Result<PathBuf, &str> = match env::args().nth(1) {
-        Some(path) => {
-            let mut f = PathBuf::new();
-            f.push(path);
-            match f.is_dir() {
-                true => Ok(f),
-                false => Err("None"),
-            }
-        }
-        None => Err("None"),
-    };
-    if basedir.is_err() {
-        println!("Cannot access basedir.");
-        return;
-    }
-    let mountpoint = match env::args().nth(2) {
-        Some(path) => path,
-        None => {
-            println!(
-                "Usage: {} <BASEDIR> <MOUNTPOINT>",
-                env::args().nth(0).unwrap()
-            );
-            return;
-        }
-    };
+    let args = Cli::parse();
+    let basedir: PathBuf = args.basedir;
+    let mountpoint: PathBuf = args.mountpoint;
+    // let basedir: Result<PathBuf, &str> = match env::args().nth(1) {
+    //     Some(path) => {
+    //         let mut f = PathBuf::new();
+    //         f.push(path);
+    //         match f.is_dir() {
+    //             true => Ok(f),
+    //             false => Err("None"),
+    //         }
+    //     }
+    //     None => Err("None"),
+    // };
+    // if basedir.is_err() {
+    //     println!("Cannot access basedir.");
+    //     return;
+    // }
+    // let mountpoint = match env::args().nth(2) {
+    //     Some(path) => path,
+    //     None => {
+    //         println!(
+    //             "Usage: {} <BASEDIR> <MOUNTPOINT>",
+    //             env::args().nth(0).unwrap()
+    //         );
+    //         return;
+    //     }
+    // };
     fuser::mount2(
-        JxlFilesystem::new(),
-        Path::new("/home/bocchi/fusetest/mountpoint"),
+        JxlFilesystem::new(basedir),
+        mountpoint,
         &[
             MountOption::AutoUnmount,
             MountOption::AllowOther,
